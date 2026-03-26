@@ -1,6 +1,6 @@
 """
-TITAN-G - DATI LIVE CON LUKHED-STOCKS
-47 agenti | 13 AI | Scansione automatica ogni ora
+TITAN-G - VERSIONE COMPLETA
+47 agenti | 13 AI | Entry, SL, TP | Scansione ogni ora
 """
 
 from flask import Flask, request, jsonify
@@ -17,15 +17,14 @@ TELEGRAM_TOKEN = "8629848762:AAHa1l3CEs0AguKWINcAKrvynBCi5Xglsq0"
 TELEGRAM_CHAT_ID = "2110183214"
 
 app = Flask(__name__)
-
-# Inizializza MarketData (dati live gratuiti)
 md = MarketData()
 
-# =========================================================
-# TELEGRAM CON RATE LIMIT
-# =========================================================
+# Rate limit Telegram
 _last_telegram_sent = 0
 
+# =========================================================
+# TELEGRAM
+# =========================================================
 def send_telegram(text):
     global _last_telegram_sent
     now = time.time()
@@ -176,7 +175,7 @@ ALL_AGENTS = (CRYPTO + COMMODITIES + ENERGY + DEFENSE + MEDICINE +
               TECH + SPACE + ETF + SENTIMENT + MACRO + SPECIAL)
 
 print("=" * 60)
-print("🚀 TITAN-G - DATI LIVE CON LUKHED-STOCKS")
+print("🚀 TITAN-G - VERSIONE COMPLETA")
 print(f"🧬 Agenti: {len(ALL_AGENTS)}")
 print(f"🤖 AI: {len(ai_agents.get_active())}")
 print("=" * 60)
@@ -216,7 +215,6 @@ def validate_signals(signals):
 # FUNZIONE PER OTTENERE PREZZO LIVE
 # =========================================================
 def get_live_price(ticker):
-    """Ottiene prezzo live da lukhed-stocks"""
     try:
         quote = md.get_quote(ticker)
         if quote and 'close' in quote:
@@ -226,9 +224,18 @@ def get_live_price(ticker):
     return None
 
 # =========================================================
+# FOREX GUARDIAN
+# =========================================================
+def get_eurusd():
+    try:
+        data = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X", timeout=2).json()
+        return data['chart']['result'][0]['meta']['regularMarketPrice']
+    except:
+        return 1.08
+
+# =========================================================
 # SCANSIONE AUTOMATICA (WATCHLIST)
 # =========================================================
-# Lista ticker da monitorare
 WATCHLIST = [
     "NVDA", "PLTR", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN",
     "BTC-USD", "ETH-USD", "SOL-USD", "XOM", "CVX", "LMT", "NOC", "LLY", "CRSP",
@@ -236,8 +243,7 @@ WATCHLIST = [
 ]
 
 def scan_all_tickers():
-    """Scansiona tutti i ticker e genera segnali"""
-    print(f"\n🔍 SCANSIONE AUTOMATICA - {datetime.now().strftime('%H:%M:%S')}")
+    print(f"\n🔍 SCANSIONE - {datetime.now().strftime('%H:%M:%S')}")
     
     signals = []
     for ticker in WATCHLIST:
@@ -249,7 +255,7 @@ def scan_all_tickers():
                     s = agent.analyze(ticker, price)
                     signals.append(s)
     
-    print(f"   Segnali generati: {len(signals)}")
+    print(f"   Segnali grezzi: {len(signals)}")
     
     validated = validate_signals(signals)
     
@@ -258,42 +264,51 @@ def scan_all_tickers():
         trim_history()
         send_top3_report()
     else:
-        print("   ⚠️ Nessun segnale validato")
+        print("   ⚠️ Nessun segnale validato (servono 3+ agenti concordi)")
     
     return validated
 
 # =========================================================
-# REPORT TOP 3
+# REPORT TOP 3 CON ENTRY, SL, TP
 # =========================================================
 def send_top3_report():
     if not signals_validated:
+        send_telegram("📊 *NESSUN SEGNALE VALIDATO* nell'ultima ora")
         return
     
-    eurusd = 1.08  # Semplificato
-    for s in signals_validated[-20:]:
+    eurusd = get_eurusd()
+    
+    # Calcola rendimento in EUR
+    for s in signals_validated[-50:]:
         s["return_eur"] = ((s["tp"] / eurusd) - (s["entry"] / eurusd)) / (s["entry"] / eurusd) * 100
     
-    top = sorted(signals_validated[-20:], key=lambda x: x["return_eur"], reverse=True)[:3]
+    # Top 3 per rendimento
+    top = sorted(signals_validated[-50:], key=lambda x: x["return_eur"], reverse=True)[:3]
     
     msg = f"🏆 *TOP 3 SEGNALI* {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-    msg += f"📊 Ricevuti: {len(signals_received)} | Validati: {len(signals_validated)}\n"
-    msg += f"🧬 Agenti: {len(ALL_AGENTS)} | 🤖 AI: {len(ai_agents.get_active())}\n\n"
+    msg += f"📊 Validati oggi: {len(signals_validated)} | 🤖 {len(ai_agents.get_active())} AI\n\n"
     
     for i, s in enumerate(top, 1):
         entry_eur = s["entry"] / eurusd
+        sl_eur = s["sl"] / eurusd
         tp_eur = s["tp"] / eurusd
         emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
-        msg += f"{emoji} *{s['ticker']}* ({s['category']})\n"
-        msg += f"   Agent: {s['agent']}\n"
-        msg += f"   Entry: ${s['entry']:.2f} | €{entry_eur:.2f}\n"
-        msg += f"   Target: ${s['tp']:.2f} | €{tp_eur:.2f}\n"
-        msg += f"   Rend: +{s['return_eur']:.1f}%\n\n"
+        
+        msg += f"{emoji} *{s['ticker']}* ({s['category']}) - {s['agent']}\n"
+        msg += f"   📈 *AZIONE:* BUY\n"
+        msg += f"   💰 *ENTRY:* ${s['entry']:.2f} | €{entry_eur:.2f}\n"
+        msg += f"   🛑 *STOP LOSS:* ${s['sl']:.2f} | €{sl_eur:.2f}\n"
+        msg += f"   🎯 *TAKE PROFIT:* ${s['tp']:.2f} | €{tp_eur:.2f}\n"
+        msg += f"   📊 *RENDIMENTO:* +{s['return_eur']:.1f}% (EUR)\n"
+        msg += f"   🔒 *CONFIDENZA:* {s['conf']:.0%}\n\n"
+    
+    msg += f"💱 *EUR/USD:* {eurusd:.4f}\n"
+    msg += f"⏰ Prossima scansione: tra 1 ora"
     
     send_telegram(msg)
-    return top
 
 # =========================================================
-# SCHEDULER (scansione ogni ora)
+# SCHEDULER (ogni ora)
 # =========================================================
 def schedule_scan():
     while True:
@@ -301,43 +316,7 @@ def schedule_scan():
         time.sleep(3600)  # 1 ora
 
 # =========================================================
-# WEBHOOK (opzionale, per TradingView)
-# =========================================================
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.json
-    ticker = data.get('ticker', 'UNKNOWN')
-    action = data.get('action', 'BUY')
-    price = data.get('price', 0)
-    
-    print(f"\n📡 Webhook: {ticker} {action} @ ${price}")
-    
-    signals = []
-    for agent in ALL_AGENTS:
-        if agent.activate(ticker):
-            s = agent.analyze(ticker, price)
-            signals.append(s)
-    
-    validated = validate_signals(signals)
-    
-    if validated:
-        best = validated[0]
-        signals_validated.append(best)
-        trim_history()
-        
-        msg = f"✅ *SEGNALE VALIDATO* {ticker}\n\n"
-        msg += f"🎯 {action}\n"
-        msg += f"💰 Entry: ${best['entry']:.2f}\n"
-        msg += f"🎯 TP: ${best['tp']:.2f}\n"
-        msg += f"🧬 {len(validated)} agenti concordi"
-        
-        send_telegram(msg)
-        return jsonify({"status": "validated"})
-    else:
-        return jsonify({"status": "rejected"})
-
-# =========================================================
-# ROUTES
+# ROUTES FLASK
 # =========================================================
 @app.route('/health', methods=['GET'])
 def health():
@@ -345,12 +324,12 @@ def health():
         "status": "ok",
         "agents": len(ALL_AGENTS),
         "ai": len(ai_agents.get_active()),
-        "watchlist": len(WATCHLIST)
+        "watchlist": len(WATCHLIST),
+        "signals_validated": len(signals_validated)
     })
 
 @app.route('/scan', methods=['GET'])
 def scan():
-    """Avvia scansione manuale"""
     scan_all_tickers()
     return jsonify({"status": "ok"})
 
@@ -360,8 +339,7 @@ def home():
         "name": "Titan-G",
         "agents": len(ALL_AGENTS),
         "ai": len(ai_agents.get_active()),
-        "watchlist": len(WATCHLIST),
-        "endpoints": ["/webhook (POST)", "/scan (GET)", "/health (GET)"]
+        "watchlist": len(WATCHLIST)
     })
 
 # =========================================================
@@ -369,20 +347,19 @@ def home():
 # =========================================================
 def run_bot():
     print("\n" + "=" * 60)
-    print("🚀 TITAN-G - DATI LIVE DA LUKHED-STOCKS")
-    print("=" * 60)
+    print("🚀 TITAN-G - VERSIONE COMPLETA")
     print(f"📊 Watchlist: {len(WATCHLIST)} ticker")
     print(f"🧬 Agenti: {len(ALL_AGENTS)}")
     print(f"🤖 AI: {len(ai_agents.get_active())}")
     print("=" * 60)
     print("⏰ Scansione automatica ogni ora")
-    print("📡 Webhook: http://localhost:5000/webhook")
-    print("🔍 Scan manuale: http://localhost:5000/scan")
+    print("📡 Health check: /health")
+    print("🔍 Scan manuale: /scan")
     print("=" * 60)
     
-    send_telegram(f"🚀 *TITAN-G ATTIVO*\n\n📊 {len(WATCHLIST)} ticker monitorati\n🧬 {len(ALL_AGENTS)} agenti\n🤖 {len(ai_agents.get_active())} AI\n✅ 3+ conferme\n\n⏰ Scansione automatica ogni ora\n🔍 /scan per scansione manuale")
+    send_telegram(f"🚀 *TITAN-G ATTIVO*\n\n📊 {len(WATCHLIST)} ticker monitorati\n🧬 {len(ALL_AGENTS)} agenti\n🤖 {len(ai_agents.get_active())} AI\n✅ 3+ conferme obbligatorie\n\n📈 Segnali con ENTRY, STOP LOSS, TAKE PROFIT\n⏰ Report ogni ora")
     
-    # Avvia thread scansione automatica
+    # Avvia thread scansione
     threading.Thread(target=schedule_scan, daemon=True).start()
     
     app.run(host='0.0.0.0', port=5000, debug=False)
