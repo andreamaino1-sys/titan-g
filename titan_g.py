@@ -1,13 +1,14 @@
 """
-TITAN-G - VERSIONE REALE
-47 agenti | 13 AI | Dati LIVE | Anti-Overfitting
+TITAN-G - VERSIONE CORRETTA
+Agenti con vera analisi | Validazione realistica
 """
 
 from flask import Flask, request, jsonify
 import requests
 import threading
 import time
-import random
+import yfinance as yf
+import numpy as np
 from datetime import datetime
 
 # =========================================================
@@ -15,9 +16,9 @@ from datetime import datetime
 # =========================================================
 TELEGRAM_TOKEN = "8629848762:AAHa1l3CEs0AguKWINcAKrvynBCi5Xglsq0"
 TELEGRAM_CHAT_ID = "2110183214"
+ALPHA_VANTAGE_KEY = "2Z9VIHPAL5L5IWHS"
 
 app = Flask(__name__)
-
 _last_telegram_sent = 0
 
 # =========================================================
@@ -38,168 +39,304 @@ def send_telegram(text):
         print(f"   ❌ Telegram error: {e}")
 
 # =========================================================
-# AI AGENTS (13)
+# AGENTE CON ANALISI REALE (USANDO YFINANCE)
 # =========================================================
-class AIAgents:
-    def __init__(self):
-        self.ai_list = [
-            "TradingView", "Perplexity", "Grok", "Claude", "DeepSeek", "OpenAI o3",
-            "IBM Quantum", "NVIDIA DCGM", "NVIDIA TAO", "NVIDIA cuQuantum",
-            "Binance AI", "Alpha Vantage", "Neoflin"
-        ]
-    def get_active(self):
-        return self.ai_list
-
-ai_agents = AIAgents()
-
-# =========================================================
-# AGENTI (47) - OTTIMIZZATI PER LIVE
-# =========================================================
-class Agent:
-    def __init__(self, name, category, tickers, entry_mult=0.97, tp_mult=1.06, confidence=0.85):
+class SmartAgent:
+    def __init__(self, name, category, tickers, strategy="momentum"):
         self.name = name
         self.category = category
         self.tickers = tickers
-        self.entry_mult = entry_mult
-        self.tp_mult = tp_mult
-        self.confidence = confidence
+        self.strategy = strategy
+        self.last_analysis = {}
     
     def activate(self, ticker):
         return ticker in self.tickers
     
+    def get_historical_data(self, ticker):
+        """Ottiene dati storici con yfinance"""
+        try:
+            # Mappa ticker crypto per yfinance
+            yf_ticker = ticker.replace("-USD", "-USD") if "-USD" in ticker else ticker
+            stock = yf.Ticker(yf_ticker)
+            hist = stock.history(period="1mo", interval="1d")
+            
+            if hist.empty:
+                return None
+            
+            return {
+                'close': hist['Close'].values,
+                'high': hist['High'].values,
+                'low': hist['Low'].values,
+                'volume': hist['Volume'].values,
+                'dates': hist.index
+            }
+        except Exception as e:
+            print(f"   Errore dati storici {ticker}: {e}")
+            return None
+    
     def analyze(self, ticker, price):
+        """Analisi reale con dati storici"""
+        # Ottieni dati storici
+        hist_data = self.get_historical_data(ticker)
+        
+        if hist_data is None or len(hist_data['close']) < 20:
+            # Dati insufficienti, segnale debole
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.97,
+                "tp": price * 1.04,
+                "conf": 0.50,
+                "reason": "⚠️ Dati insufficienti per analisi"
+            }
+        
+        # Analisi in base alla strategia
+        close = hist_data['close']
+        volume = hist_data['volume']
+        
+        if self.strategy == "momentum":
+            return self._momentum_analysis(ticker, price, close, volume)
+        elif self.strategy == "rsi":
+            return self._rsi_analysis(ticker, price, close)
+        elif self.strategy == "volume":
+            return self._volume_analysis(ticker, price, close, volume)
+        elif self.strategy == "ma_crossover":
+            return self._ma_analysis(ticker, price, close)
+        else:
+            return self._default_analysis(ticker, price, close)
+    
+    def _momentum_analysis(self, ticker, price, close, volume):
+        """Analisi momentum: ROC e accelerazione"""
+        if len(close) < 10:
+            return None
+        
+        # ROC a 5 e 10 giorni
+        roc_5 = (close[-1] / close[-6] - 1) * 100 if len(close) >= 6 else 0
+        roc_10 = (close[-1] / close[-11] - 1) * 100 if len(close) >= 11 else 0
+        
+        # Volume conferma
+        avg_volume = np.mean(volume[-20:]) if len(volume) >= 20 else volume[-1]
+        volume_surge = volume[-1] > avg_volume * 1.3
+        
+        # Scoring
+        score = 0
+        reasons = []
+        
+        if roc_5 > 2:
+            score += 0.2
+            reasons.append(f"Momentum 5gg: +{roc_5:.1f}%")
+        elif roc_5 > 0:
+            score += 0.1
+            reasons.append(f"Leggero momentum: +{roc_5:.1f}%")
+        elif roc_5 < -2:
+            return None  # Momentum negativo, evita
+        
+        if roc_5 > roc_10:
+            score += 0.15
+            reasons.append("Accelerazione positiva")
+        
+        if volume_surge:
+            score += 0.15
+            reasons.append("Volume in aumento")
+        
+        confidence = 0.5 + score
+        
         return {
             "ticker": ticker,
             "category": self.category,
             "agent": self.name,
+            "strategy": self.strategy,
             "entry": price,
-            "sl": price * self.entry_mult,
-            "tp": price * self.tp_mult,
-            "conf": self.confidence
+            "sl": price * (0.95 if confidence > 0.7 else 0.97),
+            "tp": price * (1.08 if confidence > 0.7 else 1.05),
+            "conf": min(confidence, 0.95),
+            "reason": " | ".join(reasons)
         }
+    
+    def _rsi_analysis(self, ticker, price, close):
+        """Analisi RSI per ipervenduto"""
+        if len(close) < 15:
+            return None
+        
+        # Calcola RSI a 14 periodi
+        gains = []
+        losses = []
+        for i in range(1, 15):
+            change = close[-i] - close[-i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        
+        avg_gain = np.mean(gains)
+        avg_loss = np.mean(losses)
+        
+        if avg_loss == 0:
+            rsi = 100
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+        
+        # Cerca ipervenduto
+        if rsi < 30:
+            confidence = 0.7 + (30 - rsi) / 100
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.96,
+                "tp": price * 1.07,
+                "conf": min(confidence, 0.9),
+                "reason": f"RSI={rsi:.1f} (ipervenduto)"
+            }
+        
+        return None  # Non ipervenduto, niente segnale
+    
+    def _volume_analysis(self, ticker, price, close, volume):
+        """Analisi volume: accumulazione"""
+        if len(volume) < 20:
+            return None
+        
+        avg_volume = np.mean(volume[-20:])
+        volume_ratio = volume[-1] / avg_volume
+        
+        price_change = (close[-1] - close[-2]) / close[-2] * 100 if len(close) > 1 else 0
+        
+        if volume_ratio > 1.5 and price_change > 1:
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.97,
+                "tp": price * 1.06,
+                "conf": 0.75,
+                "reason": f"Volume {volume_ratio:.1f}x media, prezzo +{price_change:.1f}%"
+            }
+        
+        return None
+    
+    def _ma_analysis(self, ticker, price, close):
+        """Analisi medie mobili: golden cross"""
+        if len(close) < 50:
+            return None
+        
+        sma_20 = np.mean(close[-20:])
+        sma_50 = np.mean(close[-50:])
+        sma_20_prev = np.mean(close[-21:-1])
+        sma_50_prev = np.mean(close[-51:-1])
+        
+        # Golden cross
+        if sma_20_prev <= sma_50_prev and sma_20 > sma_50:
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.96,
+                "tp": price * 1.10,
+                "conf": 0.85,
+                "reason": "Golden Cross! SMA20 incrocia sopra SMA50"
+            }
+        
+        # Prezzo sopra SMA20 (trend rialzista)
+        if price > sma_20 and sma_20 > sma_50:
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.97,
+                "tp": price * 1.07,
+                "conf": 0.70,
+                "reason": f"Trend rialzista: prezzo sopra SMA20"
+            }
+        
+        return None
+    
+    def _default_analysis(self, ticker, price, close):
+        """Analisi base di default"""
+        if len(close) < 5:
+            return None
+        
+        # Trend semplice
+        trend = (close[-1] - close[-5]) / close[-5] * 100 if len(close) >= 5 else 0
+        
+        if trend > 0:
+            return {
+                "ticker": ticker,
+                "category": self.category,
+                "agent": self.name,
+                "strategy": self.strategy,
+                "entry": price,
+                "sl": price * 0.98,
+                "tp": price * 1.04,
+                "conf": 0.55 + (trend / 100),
+                "reason": f"Trend 5gg: +{trend:.1f}%"
+            }
+        
+        return None
 
 # =========================================================
-# CRYPTO (4)
-CRYPTO = [
-    Agent("BTC Master", "crypto", ["BTC-USD"], 0.95, 1.05, 0.85),
-    Agent("ETH Tracker", "crypto", ["ETH-USD"], 0.94, 1.06, 0.82),
-    Agent("SOL Scanner", "crypto", ["SOL-USD"], 0.93, 1.07, 0.80),
-    Agent("Whale Watcher", "crypto", ["BTC-USD", "ETH-USD"], 0.95, 1.05, 0.84),
+# CREA AGENTI CON STRATEGIE DIVERSE
+# =========================================================
+AGENTS = [
+    # Momentum
+    SmartAgent("Momentum Hunter", "tech", ["NVDA", "PLTR"], "momentum"),
+    SmartAgent("Crypto Momentum", "crypto", ["BTC-USD", "ETH-USD"], "momentum"),
+    
+    # RSI (ipervenduto)
+    SmartAgent("RSI Reversal", "tech", ["NVDA", "TSLA", "META"], "rsi"),
+    SmartAgent("Crypto RSI", "crypto", ["BTC-USD", "ETH-USD", "SOL-USD"], "rsi"),
+    
+    # Volume
+    SmartAgent("Volume Accumulator", "tech", ["AAPL", "MSFT"], "volume"),
+    SmartAgent("Whale Watcher", "crypto", ["BTC-USD"], "volume"),
+    
+    # Medie mobili
+    SmartAgent("Golden Cross", "etf", ["SPY", "QQQ"], "ma_crossover"),
+    SmartAgent("Trend Follower", "tech", ["MSFT", "NVDA"], "ma_crossover"),
+    
+    # Difesa/energia (strategia base)
+    SmartAgent("Defense Analyst", "defense", ["LMT", "NOC"], "default"),
+    SmartAgent("Energy Analyst", "energy", ["XOM", "CVX"], "default"),
 ]
 
-# MATERIE PRIME (4)
-COMMODITIES = [
-    Agent("Gold Tracker", "commodities", ["GC=F"], 0.97, 1.04, 0.78),
-    Agent("Oil Tracker", "commodities", ["CL=F"], 0.96, 1.05, 0.76),
-    Agent("Copper Scout", "commodities", ["HG=F"], 0.95, 1.06, 0.74),
-    Agent("Silver Watcher", "commodities", ["SI=F"], 0.96, 1.05, 0.75),
-]
-
-# ENERGIA (4)
-ENERGY = [
-    Agent("Oil Major", "energy", ["XOM", "CVX"], 0.96, 1.05, 0.82),
-    Agent("Renewable", "energy", ["NEE", "ENPH"], 0.95, 1.07, 0.80),
-    Agent("Grid Monitor", "energy", ["NEE"], 0.96, 1.05, 0.79),
-    Agent("Gas Tracker", "energy", ["NG=F"], 0.95, 1.06, 0.77),
-]
-
-# DIFESA (3)
-DEFENSE = [
-    Agent("Defense Shield", "defense", ["LMT", "NOC", "GD"], 0.96, 1.05, 0.84),
-    Agent("Aerospace", "defense", ["BA", "RTX"], 0.95, 1.06, 0.82),
-    Agent("Drone Tech", "defense", ["AVAV"], 0.94, 1.08, 0.80),
-]
-
-# MEDICINA (5)
-MEDICINE = [
-    Agent("Pharma", "medicine", ["LLY", "NVO"], 0.94, 1.09, 0.86),
-    Agent("Biotech", "medicine", ["CRSP", "EDIT"], 0.92, 1.12, 0.82),
-    Agent("Genomics", "medicine", ["BEAM", "NTLA"], 0.91, 1.13, 0.80),
-    Agent("Big Pharma", "medicine", ["JNJ", "PFE"], 0.96, 1.05, 0.80),
-    Agent("MedTech", "medicine", ["ISRG", "SYK"], 0.95, 1.07, 0.81),
-]
-
-# TECNOLOGIA (6)
-TECH = [
-    Agent("AI Leader", "tech", ["NVDA"], 0.97, 1.06, 0.89),
-    Agent("Data Analytics", "tech", ["PLTR"], 0.95, 1.10, 0.87),
-    Agent("Consumer Tech", "tech", ["AAPL"], 0.98, 1.04, 0.82),
-    Agent("Enterprise", "tech", ["MSFT"], 0.97, 1.05, 0.83),
-    Agent("EV Pioneer", "tech", ["TSLA"], 0.96, 1.08, 0.81),
-    Agent("Social Media", "tech", ["META"], 0.97, 1.05, 0.80),
-]
-
-# SPACE (3)
-SPACE = [
-    Agent("Launcher", "space", ["RKLB", "SPCE"], 0.92, 1.12, 0.74),
-    Agent("Satellite", "space", ["ASTS", "GSAT"], 0.91, 1.13, 0.72),
-    Agent("Infrastructure", "space", ["PL"], 0.91, 1.12, 0.73),
-]
-
-# ETF (4)
-ETF = [
-    Agent("S&P 500", "etf", ["SPY"], 0.98, 1.03, 0.73),
-    Agent("Nasdaq", "etf", ["QQQ"], 0.97, 1.04, 0.72),
-    Agent("Bonds", "etf", ["TLT"], 0.98, 1.02, 0.70),
-    Agent("World", "etf", ["IWDA.AS"], 0.97, 1.03, 0.71),
-]
-
-# SENTIMENT (3)
-SENTIMENT = [
-    Agent("Social Voice", "sentiment", ["NVDA", "PLTR", "TSLA"], 0.96, 1.07, 0.75),
-    Agent("News Whisperer", "sentiment", ["NVDA", "PLTR"], 0.95, 1.08, 0.76),
-    Agent("Elon Tracker", "sentiment", ["TSLA", "SPCE"], 0.94, 1.12, 0.79),
-]
-
-# MACRO (3)
-MACRO = [
-    Agent("Economist", "macro", ["SPY", "QQQ"], 0.97, 1.04, 0.71),
-    Agent("Fed Watcher", "macro", ["TLT"], 0.98, 1.02, 0.70),
-    Agent("Geopolitical", "macro", ["OIL", "GLD"], 0.96, 1.05, 0.74),
-]
-
-# SPECIALI (4)
-SPECIAL = [
-    Agent("Historian", "special", ["SPY"], 0.97, 1.04, 0.72),
-    Agent("Seer", "special", ["VIX"], 0.98, 1.02, 0.68),
-    Agent("Oracle", "special", ["NVDA"], 0.96, 1.07, 0.74),
-    Agent("Quantum", "special", ["BTC-USD"], 0.95, 1.05, 0.83),
-]
+print(f"🧬 Agenti con analisi reale: {len(AGENTS)}")
 
 # =========================================================
-# UNISCI TUTTI GLI AGENTI (47)
+# WATCHLIST REALE (derivata dagli agenti)
 # =========================================================
-ALL_AGENTS = (CRYPTO + COMMODITIES + ENERGY + DEFENSE + MEDICINE + 
-              TECH + SPACE + ETF + SENTIMENT + MACRO + SPECIAL)
-
-print("=" * 60)
-print("🚀 TITAN-G - VERSIONE REALE (ANTI-OVERFITTING)")
-print(f"🧬 Agenti: {len(ALL_AGENTS)}")
-print(f"🤖 AI: {len(ai_agents.get_active())}")
-print("=" * 60)
+WATCHLIST = list(set([ticker for agent in AGENTS for ticker in agent.tickers]))
+print(f"📊 Watchlist: {len(WATCHLIST)} ticker - {WATCHLIST}")
 
 # =========================================================
-# DATI LIVE CON ALPHA VANTAGE (REALE)
+# DATI LIVE
 # =========================================================
-ALPHA_VANTAGE_KEY = "2Z9VIHPAL5L5IWHS"
-
 def get_live_price_alpha(ticker):
-    """Prezzo reale da Alpha Vantage (gratis, 5 chiamate/min)"""
+    """Prezzo da Alpha Vantage"""
     try:
         url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}"
         r = requests.get(url, timeout=5)
         data = r.json()
         if 'Global Quote' in data and '05. price' in data['Global Quote']:
             return float(data['Global Quote']['05. price'])
-    except Exception as e:
-        print(f"   Alpha Vantage error {ticker}: {e}")
+    except:
+        pass
     return None
 
-# =========================================================
-# DATI LIVE CON BINANCE (CRYPTO, 1200 chiamate/min)
-# =========================================================
 def get_crypto_price_binance(ticker):
-    """Prezzo crypto reale da Binance (gratis, veloce)"""
+    """Prezzo crypto da Binance"""
     symbol = ticker.replace("-USD", "USDT")
     try:
         url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
@@ -208,94 +345,23 @@ def get_crypto_price_binance(ticker):
     except:
         return None
 
-# =========================================================
-# LISTA TICKER DA MONITORARE
-# =========================================================
-WATCHLIST = [
-    "NVDA", "PLTR", "AAPL", "MSFT", "TSLA", "META", "GOOGL", "AMZN",
-    "BTC-USD", "ETH-USD", "SOL-USD", "XOM", "CVX", "LMT", "NOC", "LLY", "CRSP",
-    "RKLB", "SPY", "QQQ", "TLT"
-]
-
-print(f"📊 Watchlist: {len(WATCHLIST)} ticker")
-
-# =========================================================
-# GET PRICE CON FALLBACK (REALE)
-# =========================================================
 def get_live_price(ticker):
-    """Ottiene prezzo reale da fonte appropriata"""
-    
-    # Crypto → Binance (veloce, gratis)
+    """Ottiene prezzo dalla fonte appropriata"""
     if ticker in ["BTC-USD", "ETH-USD", "SOL-USD"]:
-        price = get_crypto_price_binance(ticker)
-        if price:
-            return price
-    
-    # Stocks → Alpha Vantage (gratis, 5/min)
-    price = get_live_price_alpha(ticker)
-    if price:
-        return price
-    
-    return None
+        return get_crypto_price_binance(ticker)
+    return get_live_price_alpha(ticker)
 
 # =========================================================
-# ANTI-OVERFITTING: VALIDAZIONE INCROCIATA
+# VALIDAZIONE SEGNALI (2+ CONFERME, più realistico)
 # =========================================================
-def cross_validate(signals, historical_data):
-    """
-    Verifica che il segnale non sia frutto di overfitting
-    - Test su dati storici (walk-forward)
-    - Solo segnali con performance >60% su 30 giorni passano
-    """
-    if len(signals) == 0:
-        return []
-    
-    validated = []
-    for s in signals:
-        ticker = s["ticker"]
-        entry = s["entry"]
-        
-        # Cerca performance storica (simulata)
-        # In produzione: dati reali storici
-        historical_win_rate = 0.75  # default
-        
-        # Se il pattern ha win rate storico >60%, passa
-        if historical_win_rate > 0.6:
-            validated.append(s)
-            s["historical_win_rate"] = historical_win_rate
-    
-    print(f"   Anti-overfitting: {len(validated)}/{len(signals)} segnali superano il test")
-    return validated
-
-# =========================================================
-# FOREX GUARDIAN
-# =========================================================
-def get_eurusd():
-    try:
-        url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=USD&to_currency=EUR&apikey={ALPHA_VANTAGE_KEY}"
-        data = requests.get(url, timeout=3).json()
-        if 'Realtime Currency Exchange Rate' in data:
-            return float(data['Realtime Currency Exchange Rate']['5. Exchange Rate'])
-    except:
-        pass
-    return 1.08
-
-# =========================================================
-# STORICO
-# =========================================================
-signals_received = []
 signals_validated = []
 
-def trim_history():
-    global signals_received, signals_validated
-    if len(signals_received) > 1000:
-        signals_received = signals_received[-1000:]
-    if len(signals_validated) > 1000:
-        signals_validated = signals_validated[-1000:]
-
 def validate_signals(signals):
+    """Validazione: almeno 2 segnali concordi per ticker"""
     per_ticker = {}
     for s in signals:
+        if s is None:
+            continue
         ticker = s["ticker"]
         if ticker not in per_ticker:
             per_ticker[ticker] = []
@@ -303,138 +369,103 @@ def validate_signals(signals):
     
     valid = []
     for ticker, sigs in per_ticker.items():
-        if len(sigs) >= 3:
+        if len(sigs) >= 2:  # 2 conferme sono sufficienti
             best = sorted(sigs, key=lambda x: x["conf"], reverse=True)[0]
             valid.append(best)
+    
     return valid
 
 # =========================================================
-# SCANSIONE CON DATI REALI E ANTI-OVERFITTING
+# SCANSIONE PRINCIPALE
 # =========================================================
 def scan_all_tickers():
-    print(f"\n🔍 SCANSIONE REALE - {datetime.now().strftime('%H:%M:%S')}")
+    print(f"\n🔍 SCANSIONE - {datetime.now().strftime('%H:%M:%S')}")
     
-    signals = []
+    all_signals = []
+    
     for ticker in WATCHLIST:
         price = get_live_price(ticker)
-        if price:
-            print(f"   ✅ {ticker}: ${price:.2f}")
-            for agent in ALL_AGENTS:
-                if agent.activate(ticker):
-                    s = agent.analyze(ticker, price)
-                    signals.append(s)
-        else:
-            print(f"   ❌ {ticker}: dati non disponibili")
+        if not price:
+            print(f"   ❌ {ticker}: prezzo non disponibile")
+            continue
         
-        # Rispetta limite API (5 chiamate/min)
-        time.sleep(12)
+        print(f"   📊 {ticker}: ${price:.2f}")
+        
+        for agent in AGENTS:
+            if agent.activate(ticker):
+                signal = agent.analyze(ticker, price)
+                if signal:
+                    all_signals.append(signal)
+                    print(f"      ✅ {agent.name}: conf={signal['conf']:.0%} - {signal['reason']}")
+        
+        time.sleep(12)  # Rate limiting
     
-    print(f"   Segnali grezzi: {len(signals)}")
+    print(f"\n   Segnali grezzi: {len(all_signals)}")
     
-    # Validazione (3+ conferme)
-    validated = validate_signals(signals)
-    print(f"   Validati (3+ conferme): {len(validated)}")
-    
-    # ANTI-OVERFITTING: test su dati storici
-    validated = cross_validate(validated, None)
-    print(f"   Dopo anti-overfitting: {len(validated)}")
+    validated = validate_signals(all_signals)
+    print(f"   Validati (2+ conferme): {len(validated)}")
     
     if validated:
-        signals_validated.extend(validated)
-        trim_history()
-        send_top3_report()
+        global signals_validated
+        signals_validated = validated
+        send_report(validated)
     else:
-        print("   ⚠️ Nessun segnale valido dopo i filtri")
+        print("   ⚠️ Nessun segnale valido")
     
     return validated
 
-# =========================================================
-# REPORT TOP 3
-# =========================================================
-def send_top3_report():
-    if not signals_validated:
-        send_telegram("📊 *NESSUN SEGNALE VALIDATO* nell'ultima ora")
+def send_report(signals):
+    """Invia report Telegram"""
+    if not signals:
         return
     
-    eurusd = get_eurusd()
+    # Ordina per confidenza
+    top = sorted(signals, key=lambda x: x["conf"], reverse=True)[:3]
     
-    for s in signals_validated[-50:]:
-        s["return_eur"] = ((s["tp"] / eurusd) - (s["entry"] / eurusd)) / (s["entry"] / eurusd) * 100
-    
-    top = sorted(signals_validated[-50:], key=lambda x: x["return_eur"], reverse=True)[:3]
-    
-    msg = f"🏆 *TOP 3 SEGNALI* {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-    msg += f"📊 Ticker monitorati: {len(WATCHLIST)}\n"
-    msg += f"✅ Validati oggi: {len(signals_validated)} | 🤖 {len(ai_agents.get_active())} AI\n"
-    msg += f"🛡️ Anti-overfitting: attivo\n\n"
+    msg = f"🏆 *TOP SEGNALI* {datetime.now().strftime('%H:%M')}\n\n"
     
     for i, s in enumerate(top, 1):
-        entry_eur = s["entry"] / eurusd
-        sl_eur = s["sl"] / eurusd
-        tp_eur = s["tp"] / eurusd
         emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉"
-        
-        msg += f"{emoji} *{s['ticker']}* ({s['category']}) - {s['agent']}\n"
-        msg += f"   📈 *AZIONE:* BUY\n"
-        msg += f"   💰 *ENTRY:* ${s['entry']:.2f} | €{entry_eur:.2f}\n"
-        msg += f"   🛑 *STOP LOSS:* ${s['sl']:.2f} | €{sl_eur:.2f}\n"
-        msg += f"   🎯 *TAKE PROFIT:* ${s['tp']:.2f} | €{tp_eur:.2f}\n"
-        msg += f"   📊 *RENDIMENTO:* +{s['return_eur']:.1f}% (EUR)\n"
-        msg += f"   🔒 *CONFIDENZA:* {s['conf']:.0%}\n"
-        if "historical_win_rate" in s:
-            msg += f"   📜 *WIN RATE STORICO:* {s['historical_win_rate']:.0%}\n"
-        msg += "\n"
-    
-    msg += f"💱 *EUR/USD:* {eurusd:.4f}\n"
-    msg += f"⏰ Prossima scansione: tra 1 ora"
+        msg += f"{emoji} *{s['ticker']}* ({s['category']})\n"
+        msg += f"   🤖 {s['agent']} - {s['strategy']}\n"
+        msg += f"   💰 Entry: ${s['entry']:.2f}\n"
+        msg += f"   🎯 TP: ${s['tp']:.2f} | 🛑 SL: ${s['sl']:.2f}\n"
+        msg += f"   🔒 Conf: {s['conf']:.0%}\n"
+        msg += f"   📝 {s['reason']}\n\n"
     
     send_telegram(msg)
 
 # =========================================================
-# SCHEDULER
-# =========================================================
-def schedule_scan():
-    while True:
-        scan_all_tickers()
-        time.sleep(3600)  # 1 ora
-
-# =========================================================
-# WEBHOOK (per TradingView)
+# WEBHOOK
 # =========================================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
-    ticker = data.get('ticker', 'UNKNOWN')
-    action = data.get('action', 'BUY')
+    ticker = data.get('ticker')
     price = data.get('price', 0)
     
-    print(f"\n📡 Webhook: {ticker} {action} @ ${price}")
+    print(f"\n📡 Webhook: {ticker} @ ${price}")
     
     signals = []
-    for agent in ALL_AGENTS:
+    for agent in AGENTS:
         if agent.activate(ticker):
-            s = agent.analyze(ticker, price)
-            signals.append(s)
+            signal = agent.analyze(ticker, price)
+            if signal:
+                signals.append(signal)
     
     validated = validate_signals(signals)
-    validated = cross_validate(validated, None)
     
     if validated:
         best = validated[0]
-        eurusd = get_eurusd()
-        
-        msg = f"⚡ *SEGNALE VALIDATO* {ticker}\n\n"
-        msg += f"🎯 {action}\n"
-        msg += f"💰 Entry: ${best['entry']:.2f} | €{best['entry']/eurusd:.2f}\n"
-        msg += f"🎯 TP: ${best['tp']:.2f} | €{best['tp']/eurusd:.2f}\n"
-        msg += f"🧬 {len(validated)} agenti concordi\n"
-        msg += f"🛡️ Anti-overfitting: passato"
-        
+        msg = f"⚡ *SEGNALE* {ticker}\n\n"
+        msg += f"🤖 {best['agent']} ({best['strategy']})\n"
+        msg += f"💰 Entry: ${best['entry']:.2f}\n"
+        msg += f"🎯 TP: ${best['tp']:.2f}\n"
+        msg += f"📝 {best['reason']}"
         send_telegram(msg)
-        return jsonify({"status": "validated"})
-    else:
-        send_telegram(f"⚠️ *Segnale non validato* {ticker}\n\n💰 ${price:.2f}\n❌ Servono 3+ agenti concordi o fallito anti-overfitting")
-        return jsonify({"status": "rejected"})
+        return jsonify({"status": "validated", "signal": best})
+    
+    return jsonify({"status": "rejected"})
 
 # =========================================================
 # ROUTES
@@ -443,11 +474,9 @@ def webhook():
 def health():
     return jsonify({
         "status": "ok",
-        "agents": len(ALL_AGENTS),
-        "ai": len(ai_agents.get_active()),
+        "agents": len(AGENTS),
         "watchlist": len(WATCHLIST),
-        "signals_validated": len(signals_validated),
-        "anti_overfitting": "active"
+        "signals": len(signals_validated)
     })
 
 @app.route('/scan', methods=['GET'])
@@ -459,10 +488,9 @@ def scan():
 def home():
     return jsonify({
         "name": "Titan-G",
-        "agents": len(ALL_AGENTS),
-        "ai": len(ai_agents.get_active()),
-        "watchlist": len(WATCHLIST),
-        "anti_overfitting": "active"
+        "version": "2.0",
+        "agents": len(AGENTS),
+        "strategies": ["momentum", "rsi", "volume", "ma_crossover", "default"]
     })
 
 # =========================================================
@@ -475,18 +503,13 @@ def schedule_scan():
 
 def run_bot():
     print("\n" + "=" * 60)
-    print("🚀 TITAN-G - VERSIONE REALE")
+    print("🚀 TITAN-G 2.0 - CON ANALISI REALE")
     print(f"📊 Watchlist: {len(WATCHLIST)} ticker")
-    print(f"🧬 Agenti: {len(ALL_AGENTS)}")
-    print(f"🤖 AI: {len(ai_agents.get_active())}")
-    print(f"🛡️ Anti-overfitting: attivo")
-    print(f"🔑 Alpha Vantage: {ALPHA_VANTAGE_KEY[:10]}...")
-    print("=" * 60)
-    print("📡 Dati reali da Alpha Vantage e Binance")
-    print("⏰ Scansione ogni ora (rispetta limiti API)")
+    print(f"🧬 Agenti: {len(AGENTS)} con strategie diverse")
+    print(f"🎯 Strategie: momentum, rsi, volume, ma_crossover")
     print("=" * 60)
     
-    send_telegram(f"🚀 *TITAN-G ATTIVO*\n\n📊 {len(WATCHLIST)} ticker monitorati\n🧬 {len(ALL_AGENTS)} agenti\n🤖 {len(ai_agents.get_active())} AI\n✅ 3+ conferme\n🛡️ Anti-overfitting: attivo\n\n📡 Dati reali da Alpha Vantage e Binance\n⏰ Report ogni ora")
+    send_telegram(f"🚀 *TITAN-G 2.0 ATTIVO*\n\n📊 {len(WATCHLIST)} ticker\n🧬 {len(AGENTS)} agenti con analisi reale\n🎯 Strategie: momentum, RSI, volume, MA crossover\n✅ Validazione: 2+ conferme")
     
     threading.Thread(target=schedule_scan, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)
